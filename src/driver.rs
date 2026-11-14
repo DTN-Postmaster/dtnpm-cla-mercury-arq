@@ -12,16 +12,37 @@ use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, trace, warn};
 
 use hardy_async::TaskPool;
-use hardy_bpa::cla::{Acceptance, ClaAddress, Sink};
+use hardy_bpa::cla::{Acceptance, ClaAddress, ForwardBundleResult, Sink};
 use hardy_bpv7::eid::NodeId;
 
-use crate::config::{Config, PeerEntry};
+use crate::config::{Config, PeerEntry, is_valid_callsign, normalize_callsign};
 use crate::error::{Error, Result};
 
-/// Converts a callsign into a canonical Mercury [`ClaAddress`].
+/// Maximum bundle frame length permitted over the Mercury ARQ data socket (16 MiB).
+pub const MAX_MERCURY_FRAME: usize = 16 * 1024 * 1024;
+
+/// Maximum number of dynamic peer callsign entries retained in memory.
+const MAX_PEERS: usize = 256;
+
+const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Converts a callsign into a canonical normalized Mercury [`ClaAddress`].
 #[must_use]
 pub fn callsign_to_cla_address(callsign: &str) -> ClaAddress {
-    ClaAddress::Private(Bytes::copy_from_slice(callsign.to_uppercase().as_bytes()))
+    ClaAddress::Private(Bytes::from(normalize_callsign(callsign).into_bytes()))
+}
+
+/// Extracts a normalized callsign string from a Mercury [`ClaAddress`], if applicable.
+#[must_use]
+pub fn cla_address_to_callsign(addr: &ClaAddress) -> Option<String> {
+    match addr {
+        ClaAddress::Private(bytes) => std::str::from_utf8(bytes)
+            .ok()
+            .map(normalize_callsign)
+            .filter(|s| !s.is_empty()),
+        _ => None,
+    }
 }
 
 /// Commands sent to the background driver task.
@@ -34,10 +55,11 @@ pub enum DriverCommand {
     },
     /// Disconnect any active ARQ session.
     Disconnect { reply: oneshot::Sender<Result<()>> },
-    /// Forward a bundle across the active data socket.
+    /// Forward a bundle across the active data socket to a specific callsign.
     ForwardBundle {
+        target_callsign: String,
         data: Bytes,
-        reply: oneshot::Sender<Result<()>>,
+        reply: oneshot::Sender<Result<ForwardBundleResult>>,
     },
     /// Register a known peer mapping.
     RegisterPeer { peer: PeerEntry },
@@ -53,6 +75,7 @@ enum SessionState {
     Connecting {
         peer_callsign: String,
         peer_node_id: NodeId,
+        entered_at: Instant,
     },
     Connected {
         peer_callsign: String,
@@ -60,7 +83,9 @@ enum SessionState {
         connected_at: Instant,
         last_activity: Instant,
     },
-    Disconnecting,
+    Disconnecting {
+        entered_at: Instant,
+    },
 }
 
 pub struct Driver {
@@ -71,23 +96,36 @@ pub struct Driver {
     peers: HashMap<String, NodeId>,
 }
 
-fn is_valid_callsign(call: &str) -> bool {
-    let call = call.trim();
-    !call.is_empty()
-        && call.len() <= 15
-        && call.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-}
-
 impl Driver {
     pub fn spawn(
-        config: Config,
+        mut config: Config,
         sink: Arc<dyn Sink>,
         tasks: Arc<TaskPool>,
         cmd_rx: mpsc::Receiver<DriverCommand>,
     ) -> tokio::task::JoinHandle<()> {
+        if let Err(e) = config.validate_callsign() {
+            error!("Mercury CLA callsign validation failed: {e}");
+            return tokio::spawn(async {});
+        }
+        config.my_callsign = normalize_callsign(&config.my_callsign);
+
         let mut peers = HashMap::new();
         for p in &config.peers {
-            peers.insert(p.callsign.to_uppercase(), p.effective_node_id());
+            let norm = normalize_callsign(&p.callsign);
+            if !is_valid_callsign(&norm) {
+                warn!(
+                    "ignoring invalid preconfigured Mercury peer callsign {:?}",
+                    p.callsign
+                );
+                continue;
+            }
+            if peers.len() >= MAX_PEERS && !peers.contains_key(&norm) {
+                warn!(
+                    "Mercury peer table reached cap of {MAX_PEERS}; ignoring extra configured peer {norm}"
+                );
+                break;
+            }
+            peers.insert(norm, p.effective_node_id());
         }
         let driver = Self {
             config,
@@ -97,6 +135,46 @@ impl Driver {
             peers,
         };
         tokio::spawn(driver.run())
+    }
+
+    fn cache_peer(&mut self, callsign: &str, node_id: Option<NodeId>) -> Option<NodeId> {
+        let norm = normalize_callsign(callsign);
+        if !is_valid_callsign(&norm) {
+            warn!("rejecting invalid Mercury peer callsign {:?}", callsign);
+            return None;
+        }
+        if let Some(nid) = node_id {
+            if self.peers.contains_key(&norm) || self.peers.len() < MAX_PEERS {
+                self.peers.insert(norm, nid.clone());
+                return Some(nid);
+            }
+            warn!("Mercury peer table reached cap of {MAX_PEERS}; ignoring new peer {norm}");
+            return None;
+        }
+        if let Some(existing) = self.peers.get(&norm) {
+            return Some(existing.clone());
+        }
+        if self.peers.len() >= MAX_PEERS {
+            warn!("Mercury peer table reached cap of {MAX_PEERS}; rejecting uncached peer {norm}");
+            return None;
+        }
+        let lower = norm.to_lowercase();
+        let derived = format!("dtn://{lower}/").parse().unwrap_or_else(|_| {
+            NodeId::Dtn(hardy_bpv7::eid::DtnNodeId {
+                node_name: lower.into_boxed_str(),
+            })
+        });
+        self.peers.insert(norm, derived.clone());
+        Some(derived)
+    }
+
+    async fn remove_active_session_peer(&self, session: &SessionState) {
+        if let SessionState::Connected { peer_callsign, .. }
+        | SessionState::Connecting { peer_callsign, .. } = session
+        {
+            let cla_addr = callsign_to_cla_address(peer_callsign);
+            let _ = self.sink.remove_peer(&cla_addr).await;
+        }
     }
 
     async fn run(mut self) {
@@ -140,7 +218,7 @@ impl Driver {
                                     let _ = reply.send(false);
                                 }
                                 Some(DriverCommand::RegisterPeer { peer }) => {
-                                    self.peers.insert(peer.callsign.to_uppercase(), peer.effective_node_id());
+                                    let _ = self.cache_peer(&peer.callsign, Some(peer.effective_node_id()));
                                 }
                             }
                             continue 'outer;
@@ -151,8 +229,37 @@ impl Driver {
 
             // Initialize Mercury TNC mode
             if let Err(err) = self.init_mercury_tnc(&mut ctl_stream).await {
-                warn!("failed to initialize Mercury TNC via control port: {err}");
-                continue 'outer;
+                warn!(
+                    "failed to initialize Mercury TNC via control port: {err}. Retrying in {:?}",
+                    connect_retry_delay
+                );
+                tokio::select! {
+                    _ = sleep(connect_retry_delay) => {
+                        connect_retry_delay = (connect_retry_delay * 2).min(Duration::from_secs(5));
+                        continue 'outer;
+                    }
+                    cmd = self.cmd_rx.recv() => {
+                        match cmd {
+                            Some(DriverCommand::Shutdown) | None => break 'outer,
+                            Some(DriverCommand::Connect { reply, .. }) => {
+                                let _ = reply.send(Err(Error::Control("Mercury TNC init failed".into())));
+                            }
+                            Some(DriverCommand::Disconnect { reply }) => {
+                                let _ = reply.send(Ok(()));
+                            }
+                            Some(DriverCommand::ForwardBundle { reply, .. }) => {
+                                let _ = reply.send(Err(Error::Control("Mercury TNC init failed".into())));
+                            }
+                            Some(DriverCommand::IsConnected { reply }) => {
+                                let _ = reply.send(false);
+                            }
+                            Some(DriverCommand::RegisterPeer { peer }) => {
+                                let _ = self.cache_peer(&peer.callsign, Some(peer.effective_node_id()));
+                            }
+                        }
+                        continue 'outer;
+                    }
+                }
             }
 
             info!("connected and initialized Mercury TNC control and data interfaces");
@@ -166,7 +273,7 @@ impl Driver {
 
             let (data_rx_tx, mut data_rx_rx) = mpsc::channel::<Bytes>(64);
             let (data_tx_tx, mut data_tx_rx) =
-                mpsc::channel::<(Bytes, oneshot::Sender<Result<()>>)>(64);
+                mpsc::channel::<(Bytes, oneshot::Sender<Result<ForwardBundleResult>>)>(64);
             let (ctl_line_tx, mut ctl_line_rx) = mpsc::channel::<String>(64);
 
             // Spawn background task to read CRLF lines from control socket
@@ -182,7 +289,7 @@ impl Driver {
                     frame.extend_from_slice(&bundle);
                     match data_writer.write_all(&frame).await {
                         Ok(()) => {
-                            let _ = reply.send(Ok(()));
+                            let _ = reply.send(Ok(ForwardBundleResult::Sent));
                         }
                         Err(e) => {
                             let _ = reply.send(Err(Error::Io(e)));
@@ -197,15 +304,36 @@ impl Driver {
             'session_loop: loop {
                 tokio::select! {
                     _ = idle_interval.tick() => {
-                        if let SessionState::Connected { peer_callsign, last_activity, .. } = &session
-                            && let Some(idle_to) = self.config.idle_timeout
-                            && last_activity.elapsed() >= idle_to
-                        {
-                            info!("idle timeout reached for peer {peer_callsign}, issuing disconnect");
-                            let cla_addr = callsign_to_cla_address(peer_callsign);
-                            let _ = self.sink.remove_peer(&cla_addr).await;
-                            let _ = ctl_writer.write_all(b"DISCONNECT\r").await;
-                            session = SessionState::Disconnecting;
+                        match &session {
+                            SessionState::Connected { peer_callsign, last_activity, .. }
+                                if self.config.idle_timeout.is_some_and(|idle_to| last_activity.elapsed() >= idle_to) =>
+                            {
+                                info!("idle timeout reached for peer {peer_callsign}, issuing disconnect");
+                                self.remove_active_session_peer(&session).await;
+                                let _ = ctl_writer.write_all(b"DISCONNECT\r").await;
+                                session = SessionState::Disconnecting { entered_at: Instant::now() };
+                            }
+                            SessionState::Connecting { peer_callsign, entered_at, .. } => {
+                                let connect_to = self.config.connect_timeout.unwrap_or(DEFAULT_CONNECT_TIMEOUT);
+                                if entered_at.elapsed() >= connect_to {
+                                    warn!("Mercury connect handshake to {peer_callsign} timed out after {connect_to:?}; resetting to Disconnected");
+                                    let _ = ctl_writer.write_all(b"DISCONNECT\r").await;
+                                    session = SessionState::Disconnected;
+                                    if let Some(reply) = pending_connect_reply.take() {
+                                        let _ = reply.send(Err(Error::Timeout));
+                                    }
+                                }
+                            }
+                            SessionState::Disconnecting { entered_at }
+                                if entered_at.elapsed() >= DISCONNECT_TIMEOUT =>
+                            {
+                                warn!("Mercury disconnect handshake timed out after {DISCONNECT_TIMEOUT:?}; forcing Disconnected");
+                                session = SessionState::Disconnected;
+                                if let Some(reply) = pending_disconnect_reply.take() {
+                                    let _ = reply.send(Err(Error::Timeout));
+                                }
+                            }
+                            _ => {}
                         }
                     }
 
@@ -261,26 +389,32 @@ impl Driver {
 
                         match cmd {
                             DriverCommand::Connect { callsign, node_id, reply } => {
-                                if !is_valid_callsign(&callsign) || !is_valid_callsign(&self.config.my_callsign) {
-                                    let _ = reply.send(Err(Error::Control("Invalid callsign format".into())));
+                                let upper_call = normalize_callsign(&callsign);
+                                let mycall = normalize_callsign(&self.config.my_callsign);
+                                if !is_valid_callsign(&upper_call) || !is_valid_callsign(&mycall) {
+                                    let _ = reply.send(Err(Error::InvalidCallsign(format!(
+                                        "Invalid callsign format (my={}, remote={})",
+                                        mycall, upper_call
+                                    ))));
                                     continue;
                                 }
                                 match session {
                                     SessionState::Disconnected => {
-                                        let upper_call = callsign.to_uppercase();
-                                        info!("dialing Mercury ARQ: CONNECT {} {}", self.config.my_callsign, upper_call);
-                                        let connect_cmd = format!("CONNECT {} {}\r", self.config.my_callsign, upper_call);
+                                        info!("dialing Mercury ARQ: CONNECT {} {}", mycall, upper_call);
+                                        let connect_cmd = format!("CONNECT {mycall} {upper_call}\r");
                                         if let Err(err) = ctl_writer.write_all(connect_cmd.as_bytes()).await {
                                             let _ = reply.send(Err(Error::Io(err)));
                                         } else {
+                                            let _ = self.cache_peer(&upper_call, Some(node_id.clone()));
                                             session = SessionState::Connecting {
                                                 peer_callsign: upper_call,
                                                 peer_node_id: node_id,
+                                                entered_at: Instant::now(),
                                             };
                                             pending_connect_reply = Some(reply);
                                         }
                                     }
-                                    SessionState::Connected { ref peer_callsign, .. } if peer_callsign == &callsign.to_uppercase() => {
+                                    SessionState::Connected { ref peer_callsign, .. } if peer_callsign == &upper_call => {
                                         let _ = reply.send(Ok(()));
                                     }
                                     _ => {
@@ -291,13 +425,13 @@ impl Driver {
 
                             DriverCommand::Disconnect { reply } => {
                                 match session {
-                                    SessionState::Connected { ref peer_callsign, .. } | SessionState::Connecting { ref peer_callsign, .. } => {
-                                        let cla_addr = callsign_to_cla_address(peer_callsign);
-                                        let _ = self.sink.remove_peer(&cla_addr).await;
+                                    SessionState::Connected { .. } | SessionState::Connecting { .. } => {
+                                        self.remove_active_session_peer(&session).await;
                                         if let Err(err) = ctl_writer.write_all(b"DISCONNECT\r").await {
+                                            session = SessionState::Disconnected;
                                             let _ = reply.send(Err(Error::Io(err)));
                                         } else {
-                                            session = SessionState::Disconnecting;
+                                            session = SessionState::Disconnecting { entered_at: Instant::now() };
                                             pending_disconnect_reply = Some(reply);
                                         }
                                     }
@@ -307,9 +441,24 @@ impl Driver {
                                 }
                             }
 
-                            DriverCommand::ForwardBundle { data, reply } => {
+                            DriverCommand::ForwardBundle { target_callsign, data, reply } => {
+                                if data.len() > MAX_MERCURY_FRAME {
+                                    let _ = reply.send(Err(Error::PayloadTooLarge {
+                                        size: data.len() as u64,
+                                        max: MAX_MERCURY_FRAME as u64,
+                                    }));
+                                    continue;
+                                }
                                 match session {
-                                    SessionState::Connected { ref mut last_activity, .. } => {
+                                    SessionState::Connected { ref peer_callsign, ref mut last_activity, .. } => {
+                                        let target = normalize_callsign(&target_callsign);
+                                        if target != *peer_callsign {
+                                            warn!(
+                                                "dropping bundle addressed to {target}: active Mercury ARQ session is with {peer_callsign}"
+                                            );
+                                            let _ = reply.send(Ok(ForwardBundleResult::NoNeighbour));
+                                            continue;
+                                        }
                                         *last_activity = Instant::now();
                                         if data_tx_tx.send((data, reply)).await.is_err() {
                                             break 'session_loop;
@@ -328,20 +477,33 @@ impl Driver {
                             }
 
                             DriverCommand::RegisterPeer { peer } => {
-                                self.peers.insert(peer.callsign.to_uppercase(), peer.effective_node_id());
+                                let _ = self.cache_peer(&peer.callsign, Some(peer.effective_node_id()));
                             }
 
                             DriverCommand::Shutdown => {
-                                if let SessionState::Connected { ref peer_callsign, .. } = session {
-                                    let cla_addr = callsign_to_cla_address(peer_callsign);
-                                    let _ = self.sink.remove_peer(&cla_addr).await;
+                                self.remove_active_session_peer(&session).await;
+                                if matches!(session, SessionState::Connected { .. } | SessionState::Connecting { .. }) {
                                     let _ = ctl_writer.write_all(b"DISCONNECT\r").await;
                                 }
+                                ctl_reader_task.abort();
+                                data_reader_task.abort();
+                                data_writer_task.abort();
                                 break 'outer;
                             }
                         }
                     }
                 }
+            }
+
+            // Reset session state and withdraw any BPA peer registration before reconnecting
+            self.remove_active_session_peer(&session).await;
+            session = SessionState::Disconnected;
+            let _ = &session;
+            if let Some(reply) = pending_connect_reply.take() {
+                let _ = reply.send(Err(Error::ConnectionFailed));
+            }
+            if let Some(reply) = pending_disconnect_reply.take() {
+                let _ = reply.send(Ok(()));
             }
 
             ctl_reader_task.abort();
@@ -359,9 +521,9 @@ impl Driver {
     }
 
     async fn init_mercury_tnc(&self, ctl: &mut TcpStream) -> Result<()> {
-        let mycall = self.config.my_callsign.trim().to_uppercase();
+        let mycall = normalize_callsign(&self.config.my_callsign);
         if !is_valid_callsign(&mycall) {
-            return Err(Error::Control(format!(
+            return Err(Error::InvalidCallsign(format!(
                 "Invalid configured my_callsign: {mycall}"
             )));
         }
@@ -409,7 +571,6 @@ impl Driver {
 
     async fn data_read_loop(mut reader: tokio::net::tcp::OwnedReadHalf, tx: mpsc::Sender<Bytes>) {
         let mut len_buf = [0u8; 4];
-        const MAX_MERCURY_FRAME: usize = 16 * 1024 * 1024; // 16 MiB max bundle over RF ARQ
 
         loop {
             if reader.read_exact(&mut len_buf).await.is_err() {
@@ -447,31 +608,28 @@ impl Driver {
     ) {
         if line.starts_with("CONNECTED") {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            let (src, dst) = if parts.len() >= 3 {
-                (parts[1].to_uppercase(), parts[2].to_uppercase())
-            } else {
-                ("".to_string(), "".to_string())
-            };
+            if parts.len() < 3 {
+                warn!("ignoring malformed CONNECTED control frame: {line}");
+                return;
+            }
+            let src = normalize_callsign(parts[1]);
+            let dst = normalize_callsign(parts[2]);
+            if !is_valid_callsign(&src) || !is_valid_callsign(&dst) {
+                warn!("ignoring CONNECTED control frame with invalid callsign: {line}");
+                return;
+            }
 
             // Determine peer callsign
-            let peer = if src == self.config.my_callsign.to_uppercase() {
+            let peer = if src == normalize_callsign(&self.config.my_callsign) {
                 dst
             } else {
                 src
             };
 
-            let peer_node = self
-                .peers
-                .entry(peer.clone())
-                .or_insert_with(|| {
-                    let uri = format!("dtn://{}/", peer.to_lowercase());
-                    uri.parse().unwrap_or_else(|_| {
-                        hardy_bpv7::eid::NodeId::Dtn(hardy_bpv7::eid::DtnNodeId {
-                            node_name: peer.to_lowercase().into_boxed_str(),
-                        })
-                    })
-                })
-                .clone();
+            let Some(peer_node) = self.cache_peer(&peer, None) else {
+                warn!("ignoring CONNECTED frame for {peer}: callsign rejected or peer table full");
+                return;
+            };
 
             info!("Mercury ARQ CONNECTED with peer {peer} ({peer_node})");
 
@@ -493,14 +651,7 @@ impl Driver {
             }
         } else if line == "DISCONNECTED" {
             info!("Mercury ARQ DISCONNECTED");
-            if let SessionState::Connected {
-                ref peer_callsign, ..
-            } = *session
-            {
-                let cla_addr = callsign_to_cla_address(peer_callsign);
-                let _ = self.sink.remove_peer(&cla_addr).await;
-            }
-
+            self.remove_active_session_peer(session).await;
             *session = SessionState::Disconnected;
 
             if let Some(reply) = pending_connect_reply.take() {
@@ -509,10 +660,153 @@ impl Driver {
             if let Some(reply) = pending_disconnect_reply.take() {
                 let _ = reply.send(Ok(()));
             }
-        } else if line == "WRONG"
-            && let Some(reply) = pending_connect_reply.take()
-        {
-            let _ = reply.send(Err(Error::Control("Mercury rejected command".into())));
+        } else if line == "WRONG" {
+            warn!("Mercury TNC returned WRONG while in state {:?}", *session);
+            self.remove_active_session_peer(session).await;
+            *session = SessionState::Disconnected;
+            if let Some(reply) = pending_connect_reply.take() {
+                let _ = reply.send(Err(Error::Control("Mercury rejected command".into())));
+            }
+            if let Some(reply) = pending_disconnect_reply.take() {
+                let _ = reply.send(Err(Error::Control(
+                    "Mercury rejected disconnect command".into(),
+                )));
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hardy_bpa::async_trait;
+    use hardy_bpa::cla::{Result as ClaResult, Segment, Sink, TransferOutcome};
+    use hardy_bpa::stream::Receiver;
+    use hardy_bpv7::bundle::Id;
+
+    struct NoopSink;
+
+    #[async_trait]
+    impl Sink for NoopSink {
+        async fn unregister(&self) {}
+
+        async fn dispatch(
+            &self,
+            _peer: Option<&NodeId>,
+            _peer_addr: Option<&ClaAddress>,
+            _bundle: &mut dyn Receiver<Segment>,
+        ) -> ClaResult<Acceptance> {
+            Ok(Acceptance::Accepted)
+        }
+
+        async fn add_peer(&self, _cla_addr: ClaAddress, _node_ids: &[NodeId]) -> ClaResult<bool> {
+            Ok(true)
+        }
+
+        async fn remove_peer(&self, _cla_addr: &ClaAddress) -> ClaResult<bool> {
+            Ok(true)
+        }
+
+        async fn transfer_outcome(&self, _bundle: &Id, _outcome: TransferOutcome) -> ClaResult<()> {
+            Ok(())
+        }
+    }
+
+    fn make_test_driver() -> Driver {
+        let (_tx, rx) = mpsc::channel(8);
+        let mut config = Config::default();
+        config.my_callsign = "F4JXQ".into();
+        Driver {
+            config,
+            sink: Arc::new(NoopSink),
+            tasks: Arc::new(TaskPool::new()),
+            cmd_rx: rx,
+            peers: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wrong_frame_resets_connecting_and_disconnecting_to_disconnected() {
+        let mut driver = make_test_driver();
+        let node: NodeId = "dtn://on4kst/".parse().unwrap();
+
+        let (conn_tx, conn_rx) = oneshot::channel();
+        let mut pending_connect = Some(conn_tx);
+        let mut pending_disconnect = None;
+        let mut session = SessionState::Connecting {
+            peer_callsign: "ON4KST".into(),
+            peer_node_id: node,
+            entered_at: Instant::now(),
+        };
+
+        driver
+            .handle_ctl_line(
+                "WRONG",
+                &mut session,
+                &mut pending_connect,
+                &mut pending_disconnect,
+            )
+            .await;
+
+        assert_eq!(session, SessionState::Disconnected);
+        assert!(matches!(conn_rx.await.unwrap(), Err(Error::Control(_))));
+
+        // Also resets Disconnecting state when WRONG arrives without pending connect reply
+        let (disc_tx, disc_rx) = oneshot::channel();
+        pending_disconnect = Some(disc_tx);
+        session = SessionState::Disconnecting {
+            entered_at: Instant::now(),
+        };
+        driver
+            .handle_ctl_line(
+                "WRONG",
+                &mut session,
+                &mut pending_connect,
+                &mut pending_disconnect,
+            )
+            .await;
+        assert_eq!(session, SessionState::Disconnected);
+        assert!(matches!(disc_rx.await.unwrap(), Err(Error::Control(_))));
+    }
+
+    #[tokio::test]
+    async fn test_connected_validates_callsigns_and_caps_peers_at_256() {
+        let mut driver = make_test_driver();
+        let mut session = SessionState::Disconnected;
+        let mut pending_conn = None;
+        let mut pending_disc = None;
+
+        // Reject invalid callsigns from forged/corrupted CONNECTED lines
+        for bad_line in [
+            "CONNECTED",
+            "CONNECTED F4JXQ",
+            "CONNECTED F4JXQ AB",
+            "CONNECTED F4JXQ 123456",
+            "CONNECTED F4JXQ BAD-99",
+            "CONNECTED INVALID! F4JXQ",
+        ] {
+            driver
+                .handle_ctl_line(bad_line, &mut session, &mut pending_conn, &mut pending_disc)
+                .await;
+            assert_eq!(session, SessionState::Disconnected);
+            assert!(driver.peers.is_empty());
+        }
+
+        // Insert 300 distinct valid remote stations -> peer cache must cap strictly at 256
+        for i in 0..300usize {
+            let call = format!("ST{:04X}", i);
+            let line = format!("CONNECTED F4JXQ {call}");
+            driver
+                .handle_ctl_line(&line, &mut session, &mut pending_conn, &mut pending_disc)
+                .await;
+        }
+        assert_eq!(driver.peers.len(), MAX_PEERS);
+        assert_eq!(MAX_PEERS, 256);
+    }
+
+    #[test]
+    fn test_callsign_address_roundtrip_normalizes_whitespace_and_case() {
+        let addr = callsign_to_cla_address("  on4kst-1 ");
+        assert_eq!(cla_address_to_callsign(&addr).as_deref(), Some("ON4KST-1"));
     }
 }

@@ -31,7 +31,7 @@ required-features = ["cli"]
 [features]
 default = ["cli"]
 serde = ["dep:serde", "hardy-bpa/serde", "hardy-bpv7/serde", "dep:humantime"]
-cli = ["serde", "dep:clap", "dep:serde_yaml", "dep:toml", "dep:tracing-subscriber", "dep:anyhow", "dtnpm-core/transport-grpc"]
+cli = ["serde", "dep:clap", "dep:yaml_serde", "dep:toml", "dep:tracing-subscriber", "dep:anyhow", "dtnpm-core/transport-grpc"]
 
 [dependencies]
 hardy-async = { version = "0.2", path = "../../hardy/async" }
@@ -45,7 +45,7 @@ bytes = "1"
 serde = { version = "1", features = ["derive"], optional = true }
 humantime = { version = "2", optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
-serde_yaml = { version = "0.9", optional = true }
+yaml_serde = { version = "0.10", optional = true }
 toml = { version = "0.8", optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
 anyhow = { version = "1", optional = true }

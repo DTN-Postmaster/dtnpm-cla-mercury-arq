@@ -7,8 +7,8 @@ no-default-features = false
 
 [advisories]
 ignore = [
+    # VEX Not Affected: libsqlite3-sys 0.38.x via dtnpm-core -> rusqlite (session extension disabled)
     "RUSTSEC-2026-0459",
-    "RUSTSEC-2024-0449",
 ]
 
 [licenses]

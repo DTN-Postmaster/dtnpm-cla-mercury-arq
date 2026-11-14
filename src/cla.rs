@@ -15,8 +15,8 @@ use hardy_bpa::stream::{Receiver, buffer_stream};
 use hardy_bpv7::bundle::Id;
 use hardy_bpv7::eid::NodeId;
 
-use crate::config::{Config, PeerEntry};
-use crate::driver::{Driver, DriverCommand};
+use crate::config::{Config, PeerEntry, is_valid_callsign, normalize_callsign};
+use crate::driver::{Driver, DriverCommand, MAX_MERCURY_FRAME, cla_address_to_callsign};
 use crate::error::{Error, Result};
 
 struct ClaInner {
@@ -49,19 +49,23 @@ impl MercuryCla {
         ClaInit {
             address_type: None,
             lane_count: NonZeroU32::new(1),
-            max_bundle_size: None,
+            max_bundle_size: NonZeroU64::new(MAX_MERCURY_FRAME as u64),
         }
     }
 
     /// Proactively initiates an ARQ connection to the remote station.
     pub async fn connect_peer(&self, callsign: &str, node_id: Option<NodeId>) -> Result<()> {
+        let normalized = normalize_callsign(callsign);
+        if !is_valid_callsign(&normalized) {
+            return Err(Error::InvalidCallsign(callsign.to_string()));
+        }
         let (cmd_tx, node_id) = {
             let inner_guard = self.inner.read().await;
             let inner = inner_guard.as_ref().ok_or(Error::NotRegistered)?;
             let effective_node_id = if let Some(nid) = node_id {
                 nid
             } else {
-                let uri = format!("dtn://{}/", callsign.to_lowercase());
+                let uri = format!("dtn://{}/", normalized.to_lowercase());
                 uri.parse()
                     .map_err(|e| Error::InvalidConfig(format!("Invalid node EID: {e}")))?
             };
@@ -71,7 +75,7 @@ impl MercuryCla {
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
             .send(DriverCommand::Connect {
-                callsign: callsign.to_string(),
+                callsign: normalized,
                 node_id,
                 reply: reply_tx,
             })
@@ -89,7 +93,7 @@ impl MercuryCla {
         }
     }
 
-    /// Disconnects any active ARQ session.
+    /// Disconnects any active ARQ session (bounded by a 5s timeout so shutdown cannot deadlock).
     pub async fn disconnect(&self) -> Result<()> {
         let cmd_tx = {
             let inner_guard = self.inner.read().await;
@@ -98,14 +102,17 @@ impl MercuryCla {
         };
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        cmd_tx
-            .send(DriverCommand::Disconnect { reply: reply_tx })
-            .await
-            .map_err(|_| Error::DriverClosed)?;
-
-        match reply_rx.await {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            cmd_tx
+                .send(DriverCommand::Disconnect { reply: reply_tx })
+                .await
+                .map_err(|_| Error::DriverClosed)?;
+            reply_rx.await.map_err(|_| Error::DriverClosed)?
+        })
+        .await
+        {
             Ok(res) => res,
-            Err(_) => Err(Error::DriverClosed),
+            Err(_) => Err(Error::Timeout),
         }
     }
 
@@ -194,7 +201,7 @@ impl Cla for MercuryCla {
     async fn forward(
         &self,
         _lane: Option<u32>,
-        _cla_addr: &ClaAddress,
+        cla_addr: &ClaAddress,
         bundle_id: &Id,
         total_len: u64,
         stream: &mut dyn Receiver<Segment>,
@@ -207,18 +214,30 @@ impl Cla for MercuryCla {
             inner.cmd_tx.clone()
         };
 
+        if total_len > MAX_MERCURY_FRAME as u64 {
+            return Err(hardy_bpa::cla::Error::from(Error::PayloadTooLarge {
+                size: total_len,
+                max: MAX_MERCURY_FRAME as u64,
+            }));
+        }
+
+        let Some(target_callsign) = cla_address_to_callsign(cla_addr) else {
+            return Ok(ForwardBundleResult::NoNeighbour);
+        };
+
         let bundle_bytes = buffer_stream(stream, total_len)
             .await
             .map_err(crate::error::Error::Buffer)?;
 
         debug!(
-            "forwarding bundle {bundle_id} ({} bytes) over Mercury ARQ data socket",
+            "forwarding bundle {bundle_id} ({} bytes) for {target_callsign} over Mercury ARQ data socket",
             bundle_bytes.len()
         );
 
         let (reply_tx, reply_rx) = oneshot::channel();
         cmd_tx
             .send(DriverCommand::ForwardBundle {
+                target_callsign,
                 data: bundle_bytes,
                 reply: reply_tx,
             })
@@ -226,7 +245,7 @@ impl Cla for MercuryCla {
             .map_err(|_| hardy_bpa::cla::Error::Disconnected)?;
 
         match reply_rx.await {
-            Ok(Ok(())) => Ok(ForwardBundleResult::Sent),
+            Ok(Ok(res)) => Ok(res),
             Ok(Err(e)) => Err(hardy_bpa::cla::Error::from(e)),
             Err(_) => Err(hardy_bpa::cla::Error::Disconnected),
         }

@@ -36,6 +36,9 @@ pub enum Error {
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
 
+    #[error("Invalid callsign: {0}")]
+    InvalidCallsign(String),
+
     #[error("Bundle buffer error: {0}")]
     Buffer(#[from] hardy_bpa::stream::BufferError),
 
@@ -47,6 +50,7 @@ impl From<Error> for ClaError {
     fn from(err: Error) -> Self {
         match err {
             Error::Buffer(e) => ClaError::from(e),
+            Error::PayloadTooLarge { size, max } => ClaError::PayloadTooLarge { size, max },
             other => ClaError::Internal(Box::new(other)),
         }
     }

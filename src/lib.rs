@@ -6,8 +6,10 @@ pub mod driver;
 pub mod error;
 
 pub use cla::MercuryCla;
-pub use config::{Config, PeerEntry};
-pub use driver::callsign_to_cla_address;
+pub use config::{
+    Config, PeerEntry, is_unidentified_callsign, is_valid_callsign, normalize_callsign,
+};
+pub use driver::{MAX_MERCURY_FRAME, callsign_to_cla_address, cla_address_to_callsign};
 pub use error::{Error, Result};
 
 use dtnpm_core::coordinator::ContactExecutionEndpoint;
