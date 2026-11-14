@@ -25,6 +25,14 @@ struct Args {
     /// Optional YAML or TOML configuration file path
     #[arg(short, long)]
     config: Option<PathBuf>,
+
+    /// Optional Bearer authentication token for protected gRPC BPA endpoints
+    #[arg(long, env = "DTN_HDY_TOKEN")]
+    token: Option<String>,
+
+    /// Optional Unix Domain Socket path for connecting to a protected local BPA
+    #[arg(long, env = "DTN_HDY_SOCKET")]
+    socket: Option<String>,
 }
 
 fn load_config(path: Option<&PathBuf>) -> anyhow::Result<Config> {
@@ -52,7 +60,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| format!("http://127.0.0.1:{}", resolve_grpc_port(None)));
 
     info!(name = %args.name, grpc = %grpc_addr, "Starting dtnpm-cla-mercury-arq");
-    let client = Arc::new(GrpcBpaClient::new(&grpc_addr));
+    let client = Arc::new(GrpcBpaClient::with_auth(
+        &grpc_addr,
+        args.token.as_deref(),
+        args.socket.as_deref(),
+    ));
     let cla = Arc::new(MercuryCla::new(cfg));
     let init = cla.cla_init();
 
