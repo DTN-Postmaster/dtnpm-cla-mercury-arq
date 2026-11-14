@@ -1,0 +1,26 @@
+# Expects sibling checkouts of dtnpm-core (`../dtnpm-core`) and hardy (`../../hardy`).
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Mercury ARQ CLA Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dtn-postmaster/dtnpm-cla-mercury-arq
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dtn-postmaster/dtnpm-cla-mercury-arq
+      - name: Run cargo test
+        working-directory: dtn-postmaster/dtnpm-cla-mercury-arq
+        run: cargo test

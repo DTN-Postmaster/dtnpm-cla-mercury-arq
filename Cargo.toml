@@ -1,0 +1,55 @@
+[workspace]
+resolver = "2"
+members = ["."]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dtn-postmaster/dtnpm-cla-mercury-arq"
+
+[package]
+name = "dtnpm-cla-mercury-arq"
+description = "Mercury connected ARQ Convergence Layer Adapter for Hardy DTN BPv7"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords = ["dtn", "bpv7", "convergence-layer", "mercury", "amateur-radio"]
+
+[lib]
+name = "dtnpm_cla_mercury_arq"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "dtnpm-cla-mercury-arq"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+serde = ["dep:serde", "hardy-bpa/serde", "hardy-bpv7/serde", "dep:humantime"]
+cli = ["serde", "dep:clap", "dep:serde_yaml", "dep:toml", "dep:tracing-subscriber", "dep:anyhow", "dtnpm-core/transport-grpc"]
+
+[dependencies]
+hardy-async = { version = "0.2", path = "../../hardy/async" }
+hardy-bpa = { version = "0.2", path = "../../hardy/bpa", default-features = false, features = ["tokio"] }
+hardy-bpv7 = { version = "0.6", path = "../../hardy/bpv7" }
+dtnpm-core = { version = "0.2", path = "../dtnpm-core", default-features = false }
+tokio = { version = "1", features = ["macros", "net", "sync", "time", "rt", "io-util", "signal"] }
+tracing = { version = "0.1", default-features = false }
+thiserror = "2"
+bytes = "1"
+serde = { version = "1", features = ["derive"], optional = true }
+humantime = { version = "2", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+serde_yaml = { version = "0.9", optional = true }
+toml = { version = "0.8", optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+anyhow = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync", "net", "io-util"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
