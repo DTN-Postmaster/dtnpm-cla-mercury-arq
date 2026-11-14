@@ -16,7 +16,11 @@ use hardy_bpv7::eid::NodeId;
 
 #[async_trait]
 impl ContactExecutionEndpoint for MercuryCla {
-    async fn start_contact(&self, callsign: &str, node_id: Option<&NodeId>) -> std::result::Result<(), String> {
+    async fn start_contact(
+        &self,
+        callsign: &str,
+        node_id: Option<&NodeId>,
+    ) -> std::result::Result<(), String> {
         self.connect_peer(callsign, node_id.cloned())
             .await
             .map_err(|e| e.to_string())

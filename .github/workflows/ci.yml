@@ -10,8 +10,62 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test:
-    name: Mercury ARQ CLA Tests
+  build-test-lint:
+    name: Mercury ARQ CLA Tests & SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dtn-postmaster/dtnpm-cla-mercury-arq
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dtn-postmaster/dtnpm-cla-mercury-arq
+      - name: Formatting check
+        working-directory: dtn-postmaster/dtnpm-cla-mercury-arq
+        run: cargo fmt --all -- --check
+      - name: Strict Clippy check (production targets)
+        working-directory: dtn-postmaster/dtnpm-cla-mercury-arq
+        run: cargo clippy --workspace --lib --bins -- -D warnings -D clippy::unwrap_used -D clippy::panic
+      - name: Run cargo test
+        working-directory: dtn-postmaster/dtnpm-cla-mercury-arq
+        run: cargo test
+      - name: Generate CycloneDX / SPDX SBOM (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          path: dtn-postmaster/dtnpm-cla-mercury-arq
+          output-file: dtn-postmaster/dtnpm-cla-mercury-arq/sbom.json
+          format: cyclonedx-json
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-dtnpm-cla-mercury-arq
+          path: dtn-postmaster/dtnpm-cla-mercury-arq/sbom.json
+
+  security-audit:
+    name: Security & License Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dtn-postmaster/dtnpm-cla-mercury-arq
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dtn-postmaster/dtnpm-cla-mercury-arq
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit, cargo-deny, gitleaks
+      - name: Run strict security checks
+        working-directory: dtn-postmaster/dtnpm-cla-mercury-arq
+        run: ./scripts/check-security.sh --strict
+
+  code-coverage:
+    name: Code Coverage (LCOV)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -21,6 +75,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: dtn-postmaster/dtnpm-cla-mercury-arq
-      - name: Run cargo test
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Generate LCOV coverage report
         working-directory: dtn-postmaster/dtnpm-cla-mercury-arq
-        run: cargo test
+        run: ./scripts/check-coverage.sh --lcov
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-dtnpm-cla-mercury-arq
+          path: dtn-postmaster/dtnpm-cla-mercury-arq/lcov.info

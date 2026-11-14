@@ -6,11 +6,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
+use dtnpm_cla_mercury_arq::{Config, MercuryCla, PeerEntry};
 use hardy_bpa::cla::{Acceptance, Cla, ClaAddress, ForwardBundleResult, Segment, Sink};
 use hardy_bpv7::bundle::Id;
 use hardy_bpv7::creation_timestamp::CreationTimestamp;
 use hardy_bpv7::eid::NodeId;
-use dtnpm_cla_mercury_arq::{Config, MercuryCla, PeerEntry};
 
 struct MockSink {
     received_bundles: Arc<Mutex<Vec<Bytes>>>,

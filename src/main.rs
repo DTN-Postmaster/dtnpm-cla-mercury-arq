@@ -9,7 +9,10 @@ use hardy_bpa::bpa::BpaRegistration;
 use tracing::info;
 
 #[derive(Parser, Debug)]
-#[command(name = "dtnpm-cla-mercury-arq", about = "Standalone Mercury Connected ARQ CLA process connecting to a Hardy BPA via gRPC")]
+#[command(
+    name = "dtnpm-cla-mercury-arq",
+    about = "Standalone Mercury Connected ARQ CLA process connecting to a Hardy BPA via gRPC"
+)]
 struct Args {
     /// gRPC endpoint of the target BPA (e.g. http://127.0.0.1:50051)
     #[arg(long)]
@@ -56,7 +59,12 @@ async fn main() -> anyhow::Result<()> {
     let node_ids = client
         .register_cla(args.name.clone(), cla, None, init)
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to register Mercury CLA on {}: {e}", client.transport_name()))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to register Mercury CLA on {}: {e}",
+                client.transport_name()
+            )
+        })?;
 
     info!(?node_ids, "Mercury CLA registered; waiting for Ctrl+C");
     tokio::signal::ctrl_c().await?;
