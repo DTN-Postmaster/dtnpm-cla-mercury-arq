@@ -714,8 +714,10 @@ mod tests {
 
     fn make_test_driver() -> Driver {
         let (_tx, rx) = mpsc::channel(8);
-        let mut config = Config::default();
-        config.my_callsign = "F4JXQ".into();
+        let config = Config {
+            my_callsign: "F4JXQ".into(),
+            ..Default::default()
+        };
         Driver {
             config,
             sink: Arc::new(NoopSink),
