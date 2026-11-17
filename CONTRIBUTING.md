@@ -1,21 +1,21 @@
-# Guide de Contribution — `dtnpm-cla-mercury-arq`
+# Contributing Guide — `dtnpm-cla-mercury-arq`
 
-Ce guide présente les règles de développement et les exigences de sécurité pour le CLA Mercury Connected ARQ de `dtnpm-cla-mercury-arq`.
-
----
-
-## 1. Principes Fondamentaux
-
-- **Zéro Panic / Zéro Unwrap** : Aucun appel `.unwrap()` ou `.expect()` en code de production.
-- **Sécurité et Robustesse ARQ** :
-  - Tout état transitoire de connexion ou déconnexion doit être protégé par un minuteur d'expiration.
-  - L'émission d'un bundle doit obligatoirement vérifier la correspondance stricte avec le pair radio connecté.
-- **Traçabilité Architecturale (ADR)** :
-  - Tout ajout ou ajustement protocolaire doit faire l'objet d'un fichier ADR sous `adr/` et être indexé dans `adr/README.md`.
+This guide outlines the development rules and security requirements for the Mercury Connected ARQ CLA in `dtnpm-cla-mercury-arq`.
 
 ---
 
-## 2. Vérification Locale
+## 1. Core Principles
+
+- **Zero Panic / Zero Unwrap**: No `.unwrap()` or `.expect()` calls in production code.
+- **ARQ Security and Robustness**:
+  - Every transient connecting or disconnecting state must be protected by an expiration timer.
+  - Bundle transmission must strictly verify that the target matches the currently connected radio peer.
+- **Architectural Traceability (ADR)**:
+  - Any protocol addition or adjustment must be documented in an ADR file under `adr/` and indexed in `adr/README.md`.
+
+---
+
+## 2. Local Verification
 
 ```bash
 cargo fmt --all -- --check

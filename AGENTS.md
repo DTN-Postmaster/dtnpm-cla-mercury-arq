@@ -1,46 +1,48 @@
 # Agent Guide — `dtnpm-cla-mercury-arq`
 
 ## 🎯 Mission
-Fournir l'adaptateur de couche de convergence (CLA) pour modems HF connectés Mercury ARQ dans l'écosystème DTN Postmaster, assurant l'interfaçage avec les sockets de contrôle et de données du modem, la résolution d'indicatifs radioamateurs en EID et l'ordonnancement des fenêtres de contact radio.
+Provide the Convergence Layer Adapter (CLA) for Mercury Connected ARQ HF modems in the DTN Postmaster ecosystem, handling interfacing with the modem control and data sockets, resolving amateur radio callsigns to EIDs, and scheduling radio contact windows.
 
 ---
 
-## 🛡️ Référentiels et Exigences de Sécurité
+## 🛡️ Security Frameworks and Requirements
 
-### 1. Cyber Resilience Act (CRA) & Sécurité HF
-- **Validation d'Identité et Indicatifs Radioamateurs** :
-  - Les indicatifs d'appel sont normalisés (`normalize_callsign`) et validés syntaxiquement (`is_valid_callsign` : 3 à 10 caractères, sans caractères de contrôle `\r`, `\n`, `\0`).
-- **Opt-in Explicite pour les Tests Hors-Antenne** :
-  - L'utilisation sans indicatif (ou avec `N0CALL`) émet un avertissement et n'est tolérée qu'en mode labo/dummy load via l'option `--allow-unidentified-rf` ou `require_callsign: false`.
-  - Le drapeau `--require-callsign` permet d'interdire tout démarrage sans indicatif légitime.
-- **Supply-Chain & VEX** :
-  - Audit `cargo-audit` et `cargo-deny` ; VEX `not_affected` pour `RUSTSEC-2026-0459`.
-  - Actions CI épinglées par SHA-1 à 40 caractères.
-- **Politique de sécurité** : Consignée dans [SECURITY.md](SECURITY.md).
+### 1. Cyber Resilience Act (CRA) & HF Security
+- **Identity & Amateur Radio Callsign Validation**:
+  - Callsigns are normalized (`normalize_callsign`) and syntactically validated (`is_valid_callsign`: 3 to 10 characters, without control characters `\r`, `\n`, `\0`).
+- **Explicit Opt-In for Off-Air Testing**:
+  - Operating without a callsign (or with `N0CALL`) emits a warning and is only tolerated in lab/dummy-load mode via `--allow-unidentified-rf` or `require_callsign: false`.
+  - The `--require-callsign` flag prevents startup without a legitimate callsign.
+- **Supply-Chain & VEX**:
+  - `cargo-audit` and `cargo-deny` audits; VEX `not_affected` statement for `RUSTSEC-2026-0459`.
+  - CI actions pinned by 40-character SHA-1.
+- **Security Policy**: Documented in [SECURITY.md](SECURITY.md).
 
-### 2. Robustesse Protocolaire & Prévention des Deadlocks
-- **Résolution des Blocages d'État ARQ** :
-  - Réinitialisation systématique de la session (`SessionState::Disconnected`) en cas de ligne de contrôle `"WRONG"` du modem, avec déblocage des promesses de connexion ou déconnexion en attente (prévention du deadlock permanent `Error::Busy`).
-  - Détection et purge automatique des blocages dans les états transitoires `Connecting` (timeout par défaut de 30s) et `Disconnecting` (timeout de 5s).
-  - Timeout dur de 5s enveloppant `MercuryCla::disconnect`.
-- **Routage et Bornage des Ressources** :
-  - Plafond maximal de trame `MAX_MERCURY_FRAME` fixé à 16 Mio avec vérification préalable avant mise en mémoire tampon.
-  - Vérification obligatoire de correspondance entre l'adresse cible du bundle (`cla_addr`) et l'indicatif du pair actuellement connecté (`target == *peer_callsign`) avant toute émission, renvoyant `ForwardBundleResult::NoNeighbour` en cas d'incohérence.
-  - Table des pairs bornée à 256 entrées maximum (`MAX_PEERS`).
-
----
-
-## 🦀 Standards d'Ingénierie Rust
-
-1. **Règle Zéro Panic / Zéro Unwrap** :
-   - Tout le code sous `src/` doit être 100% exempt de `.unwrap()`, `.expect()` et de macro `panic!`.
-   - Linter strict : `-D warnings -D clippy::unwrap_used -D clippy::panic`.
-2. **ADRs Obligatoires** :
-   - Toute décision architecturale Mercury ARQ doit être consignée sous `adr/` et indexée dans [adr/README.md](adr/README.md).
+### 2. Protocol Robustness & Deadlock Prevention
+- **ARQ State Deadlock Resolution**:
+  - Systematic session reset (`SessionState::Disconnected`) upon a `"WRONG"` control line from the modem, unblocking pending connect or disconnect promises (preventing permanent `Error::Busy` deadlocks).
+  - Automatic detection and purging of stalls in transient states `Connecting` (default 30s timeout) and `Disconnecting` (5s timeout).
+  - Hard 5s timeout wrapping `MercuryCla::disconnect`.
+- **Routing and Resource Bounds**:
+  - Maximum frame cap `MAX_MERCURY_FRAME` set to 16 MiB with pre-check before buffering.
+  - Mandatory verification that the bundle's target address (`cla_addr`) matches the currently connected peer's callsign (`target == *peer_callsign`) before any transmission, returning `ForwardBundleResult::NoNeighbour` on mismatch.
+  - Peer table bounded to a maximum of 256 entries (`MAX_PEERS`).
 
 ---
 
-## ⚡ Commandes Critiques de Vérification
+## 🦀 Rust Engineering Standards
+
+1. **Zero Panic / Zero Unwrap Rule**:
+   - All code under `src/` must be 100% free of `.unwrap()`, `.expect()`, and the `panic!` macro.
+   - Strict linter: `-D warnings -D clippy::unwrap_used -D clippy::panic`.
+2. **Mandatory ADRs**:
+   - Any Mercury ARQ architectural decision must be recorded under `adr/` and indexed in [adr/README.md](adr/README.md).
+3. **Documentation Language**:
+   - English must be used as the language for all documentation, unless the file is suffixed with `.fr.md` or another language is explicitly requested in the prompt.
+
+---
+
+## ⚡ Critical Verification Commands
 
 - `cargo fmt --all -- --check`
 - `cargo clippy --offline --workspace --lib --bins -- -D warnings -D clippy::unwrap_used -D clippy::panic`
