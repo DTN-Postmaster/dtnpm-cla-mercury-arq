@@ -103,13 +103,13 @@ for arg in "$@"; do
     esac
 done
 
-# Démarrage des deux instances Mercury
+# Démarrage des deux instances Mercury (depuis MERCURY_DIR pour résoudre les chemins relatifs simulation/pipes/*.fifo)
 echo "[*] Démarrage de la Station A (STATA)..."
-"${BIN_MERCURY}" -C "${CONFIG_A}" > "${LOG_A}" 2>&1 &
+(cd "${MERCURY_DIR}" && exec "${BIN_MERCURY}" -C "${CONFIG_A}") > "${LOG_A}" 2>&1 &
 PID_A=$!
 
 echo "[*] Démarrage de la Station B (STATB)..."
-"${BIN_MERCURY}" -C "${CONFIG_B}" > "${LOG_B}" 2>&1 &
+(cd "${MERCURY_DIR}" && exec "${BIN_MERCURY}" -C "${CONFIG_B}") > "${LOG_B}" 2>&1 &
 PID_B=$!
 
 # Démarrage du pont audio temps-réel (cadencé à 8000 Hz)
