@@ -139,15 +139,24 @@ pub struct Config {
     pub bandwidth: u32,
 
     /// Connect handshake timeout (default: 30s).
-    #[cfg_attr(feature = "serde", serde(with = "humantime_duration_opt", default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "dtnpm_core::duration::serde_duration_opt", default)
+    )]
     pub connect_timeout: Option<Duration>,
 
     /// Grace period after contact duration expires to drain an in-flight bundle (default: 30s).
-    #[cfg_attr(feature = "serde", serde(with = "humantime_duration_opt", default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "dtnpm_core::duration::serde_duration_opt", default)
+    )]
     pub grace_period: Option<Duration>,
 
     /// Idle timeout after which an active session with no traffic is closed (optional).
-    #[cfg_attr(feature = "serde", serde(with = "humantime_duration_opt", default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(with = "dtnpm_core::duration::serde_duration_opt", default)
+    )]
     pub idle_timeout: Option<Duration>,
 
     /// Static or scheduled peers.
@@ -202,29 +211,6 @@ impl Config {
             );
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "serde")]
-mod humantime_duration_opt {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use std::time::Duration;
-
-    pub fn serialize<S: Serializer>(duration: &Option<Duration>, s: S) -> Result<S::Ok, S::Error> {
-        match duration {
-            Some(d) => s.collect_str(&humantime::format_duration(*d)),
-            None => s.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
-        let opt: Option<String> = Option::deserialize(d)?;
-        match opt {
-            Some(text) => humantime::parse_duration(&text)
-                .map(Some)
-                .map_err(serde::de::Error::custom),
-            None => Ok(None),
-        }
     }
 }
 
